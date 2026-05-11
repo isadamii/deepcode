@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "deepcode"
+version = "2.0.0"
+description = "DeepCode \u2014 AI coding agent powered by DeepSeek-R1"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "rich",
+    "curl-cffi>=0.8.1",
+    "wasmtime",
+    "numpy",
+    "nodriver",
+    "drissionpage"
+]
+
+[project.scripts]
+deepcode = "deepcode_cli.main:main"
+
+[tool.setuptools.packages.find]
+include = ["deepcode_cli*"]
