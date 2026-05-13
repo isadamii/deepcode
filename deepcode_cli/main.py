@@ -1,5 +1,5 @@
 """
-DeepCode v2.0 — AI coding agent powered by DeepSeek-R1
+DeepCode v2.0 — AI coding agent powered by DeepSeek-V4
 """
 
 import os, sys, json, re, time, io, argparse, math, logging
@@ -12,7 +12,7 @@ if sys.platform == "win32":
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "deepseek4free"))
 
-from dsk.api import DeepSeekAPI
+from dsk.api import DeepSeekAPI, MODEL_FLASH, MODEL_PRO
 from deepcode_cli.src.agent_tools import AgentTools
 from deepcode_cli.src.config_manager import ConfigManager
 from deepcode_cli.src.session_store import load_session, save_session, delete_session
@@ -45,7 +45,7 @@ console = Console(theme=THEME, highlight=False)
 config  = ConfigManager()
 
 SYSTEM_PROMPT = """\
-You are DeepCode, an autonomous AI coding agent powered by DeepSeek-R1.
+You are DeepCode, an autonomous AI coding agent powered by DeepSeek-V4.
 You work inside a user's coding workspace and help with all coding tasks.
 
 ━━ WHEN TO USE TOOLS vs WHEN TO REPLY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -85,6 +85,11 @@ search_text(query, directory=".", pattern="*")
 grep_search(query, directory=".", pattern="*", is_regex=False)
 
 When a coding task is fully done: TASK_COMPLETE: <one-line summary>
+
+⚠ CRITICAL — TOOL CALL PLACEMENT:
+  Your [TOOL] block MUST appear in your RESPONSE TEXT, not inside your thinking/reasoning.
+  Tool calls written inside <think>...</think> are invisible to the system and will be ignored.
+  Finish reasoning first, then emit the [TOOL] block in your actual reply.
 """
 
 SLASH_HELP = {
@@ -92,10 +97,11 @@ SLASH_HELP = {
     "/clear":     "Clear screen, start new conversation",
     "/think":     "Toggle extended thinking on/off",
     "/search":    "Toggle web search on/off",
+    "/model":     "Switch model: flash or pro (creates new chat)",
     "/status":    "Show session status",
     "/workspace": "Show/change working directory",
     "/session":   "Show session info  (/session del to reset)",
-    "/config":    "Open deepcode foler in file explorer",
+    "/config":    "Open deepcode folder in file explorer",
     "/exit":      "Exit DeepCode",
     "/quit":      "Exit DeepCode",
 }
@@ -174,6 +180,7 @@ class DeepCode:
         self._resumed     = False
         self.thinking     = thinking if thinking is not None else config.get("thinking_enabled", True)
         self.web_search   = config.get("web_search_enabled", True)
+        self.model_type   = config.get("model_type", "flash")
 
 
     def _header(self):
@@ -182,7 +189,8 @@ class DeepCode:
         branch = _git_branch(self.workspace)
         think  = "on" if self.thinking else "off"
         search = "on" if self.web_search else "off"
-        parts  = [f"[bold]DeepCode[/]", f"[meta]v{ver}[/]", f"[meta]deepseek-r1[/]", f"[meta]{ws}[/]"]
+        model_label = "deepseek-v4-pro" if self.model_type == "pro" else "deepseek-v4-flash"
+        parts  = [f"[bold]DeepCode[/]", f"[meta]v{ver}[/]", f"[meta]{model_label}[/]", f"[meta]{ws}[/]"]
         if branch:
             parts.append(f"[meta]({branch})[/]")
         parts.append(f"[meta]thinking:{think}[/]")
@@ -201,7 +209,8 @@ class DeepCode:
         branch = _git_branch(self.workspace)
         think  = "on" if self.thinking else "off"
         search = "on" if self.web_search else "off"
-        parts  = ["deepseek-r1", ws]
+        model_label = "expert" if self.model_type == "pro" else "instant"
+        parts  = [f"deepseek-r1·{model_label}", ws]
         if branch: parts.append(f"({branch})")
         if self.iteration > 0:
             parts.append(f"step {self.iteration}/{config.get('max_iterations',20)}")
@@ -210,18 +219,18 @@ class DeepCode:
         console.print(f"[meta]{' · '.join(parts)}[/]")
 
     def _connect(self) -> bool:
-        saved_chat, saved_parent = load_session(self.workspace)
+        saved_chat, saved_parent = load_session(self.workspace, self.model_type)
         if saved_chat:
             self.chat_id  = saved_chat
             self.parent_id = saved_parent
             self._resumed = True
-            console.print("[meta]↩  Resumed previous session[/]")
+            console.print(f"[meta]↩  Resumed previous {self.model_type} session[/]")
             return True
         try:
-            console.print("[meta]Connecting to DeepSeek…[/]", end="\r")
+            console.print(f"[meta]Connecting to DeepSeek ({self.model_type})…[/]", end="\r")
             self.chat_id = self.api.create_chat_session()
             console.print("                              ", end="\r")
-            save_session(self.workspace, self.chat_id, self.parent_id)
+            save_session(self.workspace, self.model_type, self.chat_id, self.parent_id)
             return True
         except Exception as e:
             console.print(f"[err]✗ Connection failed: {e}[/]")
@@ -274,11 +283,11 @@ class DeepCode:
                     self.api.delete_chat_session(self.chat_id)
                 except Exception:
                     pass
-            delete_session(self.workspace)
+            delete_session(self.workspace, self.model_type)
             self.parent_id = None
             try:
                 self.chat_id = self.api.create_chat_session()
-                save_session(self.workspace, self.chat_id, self.parent_id)
+                save_session(self.workspace, self.model_type, self.chat_id, self.parent_id)
             except Exception as e:
                 console.print(f"[err]✗ {e}[/]")
             os.system("cls" if os.name == "nt" else "clear")
@@ -340,13 +349,13 @@ class DeepCode:
                         self.api.delete_chat_session(self.chat_id)
                     except Exception as e:
                         console.print(f"[err]✗ Failed to delete session on API: {e}[/]")
-                if delete_session(self.workspace):
+                if delete_session(self.workspace, self.model_type):
                     console.print("[ok]✓ Session deleted.[/]")
                     self.chat_id = None
                     self.parent_id = None
                     try:
                         self.chat_id = self.api.create_chat_session()
-                        save_session(self.workspace, self.chat_id, self.parent_id)
+                        save_session(self.workspace, self.model_type, self.chat_id, self.parent_id)
                     except Exception as e:
                         console.print(f"[err]✗ {e}[/]")
                 else:
@@ -359,6 +368,49 @@ class DeepCode:
         elif name == "/config":
             self._open_config_folder()
             console.print(f"[ok]✓ Opened {config.config_dir}[/]")
+
+        elif name == "/model":
+            valid = {"flash", "pro"}
+            if not arg:
+                console.print(f"  [meta]current model :[/] [slash]{self.model_type}[/]")
+                console.print(f"  [meta]available     :[/] [slash]flash · pro[/]")
+            elif arg.lower() not in valid:
+                console.print(f"[err]\u2717 Unknown model '{arg}'. Use: flash or pro[/]")
+            elif arg.lower() == self.model_type:
+                console.print(f"[meta]Already using '{self.model_type}' model.[/]")
+            else:
+                new_model = arg.lower()
+                
+                if self.parent_id:
+                    console.print(f"\n[warn]⚠ Warning: Switching models will start a new session (or resume a previous {new_model} session).[/]")
+                    try:
+                        if console.input(f"[prompt]  Switch to {new_model}? (y/n) > [/]").strip().lower() != "y":
+                            return True
+                    except (KeyboardInterrupt, EOFError):
+                        return True
+
+                if self.chat_id:
+                    save_session(self.workspace, self.model_type, self.chat_id, self.parent_id)
+
+                self.model_type = new_model
+                config.set("model_type", self.model_type)
+                
+                saved_chat, saved_parent = load_session(self.workspace, self.model_type)
+                if saved_chat:
+                    self.chat_id = saved_chat
+                    self.parent_id = saved_parent
+                    self._resumed = True
+                    console.print(f"[ok]\u2713 Switched to '{self.model_type}' model \u2014 resumed previous session.[/]")
+                else:
+                    self.parent_id = None
+                    self._resumed = False
+                    try:
+                        console.print(f"[meta]Connecting to DeepSeek ({self.model_type})…[/]", end="\r")
+                        self.chat_id = self.api.create_chat_session()
+                        save_session(self.workspace, self.model_type, self.chat_id, self.parent_id)
+                        console.print(f"[ok]\u2713 Switched to '{self.model_type}' model \u2014 new session started.[/]")
+                    except Exception as e:
+                        console.print(f"[err]\u2717 {e}[/]")
 
         else:
             console.print(f"[warn]Unknown command: {name}  ·  /help for list[/]")
@@ -387,15 +439,17 @@ class DeepCode:
                 f"USER REQUEST: {prompt}\n\n"
                 "[Reminder: you are DeepCode. For coding tasks use [TOOL]{{...}}[/TOOL]. "
                 "For simple replies just respond in plain text — no tools needed. "
+                "NEVER place a [TOOL] block inside your thinking. "
                 "NEVER use run_command to print messages. Reply TASK_COMPLETE when a task is done.]"
             )
 
         while self.iteration < max_iter:
             self.iteration += 1
-            response = self._stream(current)
-            if response is None:
+            result = self._stream(current)
+            if result is None:
                 break
-            save_session(self.workspace, self.chat_id, self.parent_id)
+            response, thinking_buf = result
+            save_session(self.workspace, self.model_type, self.chat_id, self.parent_id)
 
             m = re.search(r"TASK_COMPLETE[:\s]*(.*)", response, re.IGNORECASE | re.DOTALL)
             if m:
@@ -413,6 +467,15 @@ class DeepCode:
                 fallback_m = re.search(r"(\{\s*\"action\"\s*:\s*\".*?\".*)", response, re.DOTALL)
                 if fallback_m:
                     raw_json = fallback_m.group(1).strip()
+                elif re.search(r"\[TOOL\]", thinking_buf):
+                    console.print("[warn]⚠ Tool call detected in thinking stream — retrying…[/]")
+                    current = (
+                        "SYSTEM REMINDER: Your previous [TOOL] block was placed inside your "
+                        "<think> block and was NOT received by the system. "
+                        "You MUST emit the [TOOL] block in your RESPONSE TEXT, not in thinking. "
+                        "Please repeat your last intended tool call now."
+                    )
+                    continue
                 else:
                     break
 
@@ -442,15 +505,13 @@ class DeepCode:
         else:
             console.print(f"\n[warn]⚠ Max iterations ({max_iter}) reached.[/]")
 
-    def _stream(self, prompt: str) -> Optional[str]:
+    def _stream(self, prompt: str) -> Optional[tuple]:
         full_response   = ""
         thinking_buf    = ""
         text_buf        = ""
         think_start     = None
-        think_duration  = 0.0
         spin_frame      = 0
         spin_t          = time.time()
-        last_chunk_type = None
         think_done      = False
 
         SPIN_CHARS = self.SPINNER
@@ -469,15 +530,16 @@ class DeepCode:
             return SPIN_CHARS[spin_frame % len(SPIN_CHARS)]
 
         def _render_thinking_line(text: str):
-            snippet = text[-120:].replace("\n", " ") if text else ""
+            snippet = text[-120:].replace("\n", " ").strip() if text else "Thinking..."
             col = _shimmer_ansi()
-            sys.stdout.write(f"\r  {_spin_char()}  {col}{snippet[:80]}…{ANSI_RESET}    ")
+            sys.stdout.write(f"\r\033[K  {_spin_char()}  {col}{snippet[:80]}...{ANSI_RESET}")
             sys.stdout.flush()
 
         def _clear_line():
             sys.stdout.write("\r" + " " * 120 + "\r")
             sys.stdout.flush()
 
+        api_model = MODEL_PRO if self.model_type == "pro" else MODEL_FLASH
         try:
             stream = self.api.chat_completion(
                 self.chat_id,
@@ -485,6 +547,7 @@ class DeepCode:
                 parent_message_id=self.parent_id,
                 thinking_enabled=self.thinking,
                 search_enabled=self.web_search,
+                model_type=api_model,
             )
             for chunk in stream:
                 ctype   = chunk.get("type")
@@ -502,24 +565,22 @@ class DeepCode:
                     if think_start is None:
                         think_start = now
                     thinking_buf += content
-
                     _render_thinking_line(thinking_buf)
 
                 elif ctype == "text":
                     if not think_done:
                         think_done = True
+                        _clear_line()
                         if thinking_buf:
                             think_duration = now - (think_start or now)
-                            _clear_line() 
-                            sys.stdout.flush()
                             secs = max(1, round(think_duration))
-                            console.print(f"[meta]· thought for {secs}s[/]")
+                            console.print(f"[meta]\u22c5 thought for {secs}s[/]")
                         
-                        live_ctx = Live(console=console, auto_refresh=False, transient=True, vertical_overflow="visible")
+                        live_ctx = Live(console=console, auto_refresh=False, vertical_overflow="visible")
                         live_ctx.start()
 
                     clean = content
-                    if clean.strip() == "FINISHED":
+                    if clean.strip() == "FINISHED" or clean == "FINISHED":
                         continue
                     clean = re.sub(r'FINISHED\s*$', '', clean)
                     text_buf      += clean
@@ -527,9 +588,11 @@ class DeepCode:
                     
                     if live_ctx:
                         display = re.sub(r"\[TOOL\].*?(?:\[/TOOL\]|$)", "", text_buf, flags=re.DOTALL)
-                        display = re.sub(r"TASK_COMPLETE[:\s]*.*(?:$)", "", display, flags=re.IGNORECASE | re.DOTALL)
-                        if "You are DeepCode" in display and "TOOL FORMAT" in display:
-                            display = re.sub(r'You are DeepCode.*', '', display, flags=re.DOTALL)
+                        display = re.sub(r"TASK_COMPLETE[:\s]*.*", "", display, flags=re.IGNORECASE | re.DOTALL)
+                        if "USER REQUEST:" in display:
+                            m = re.search(r"USER REQUEST:.*?\n\n", display, re.DOTALL)
+                            if m:
+                                display = display[m.end():]
                         display = display.strip()
                         
                         is_tool = "[TOOL]" in text_buf and "[/TOOL]" not in text_buf
@@ -578,7 +641,7 @@ class DeepCode:
             secs = max(1, round(think_duration))
             console.print(f"[meta]· thought for {secs}s[/]")
 
-        if config.get("show_thinking", True) and thinking_buf:
+        if config.get("show_thinking", False) and thinking_buf:
             think_grid = Table.grid()
             think_grid.add_column()
             think_grid.add_column()
@@ -588,11 +651,13 @@ class DeepCode:
         if text_buf:
             display = re.sub(r"\[TOOL\].*?\[/TOOL\]", "", text_buf, flags=re.DOTALL)
             display = re.sub(r'\bFINISHED\b\s*$', '', display)
-            display = re.sub(r"TASK_COMPLETE[:\s]*.*(?:$)", "", display, flags=re.IGNORECASE | re.DOTALL)
-            if "You are DeepCode" in display and "TOOL FORMAT" in display:
-                display = re.sub(r'You are DeepCode.*', '', display, flags=re.DOTALL)
+            display = re.sub(r"TASK_COMPLETE[:\s]*.*", "", display, flags=re.IGNORECASE | re.DOTALL)
+            if "USER REQUEST:" in display:
+                m = re.search(r"USER REQUEST:.*?\n\n", display, re.DOTALL)
+                if m:
+                    display = display[m.end():]
             display = display.strip()
-            if display:
+            if display and display != text_buf.strip():
                 grid = Table.grid()
                 grid.add_column()
                 grid.add_column()
@@ -600,7 +665,7 @@ class DeepCode:
                 console.print(grid)
 
         console.print()
-        return full_response
+        return full_response, thinking_buf
 
     def _exec_tool(self, action: str, params: dict) -> str:
         max_iter = config.get("max_iterations", 20)
@@ -779,18 +844,7 @@ def main():
     parser.add_argument("--no-thinking",       action="store_true", help="Disable thinking mode")
     args = parser.parse_args()
 
-    workspace = args.directory
-    if not workspace:
-        try:
-            import tkinter as tk
-            from tkinter import filedialog
-            root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
-            workspace = filedialog.askdirectory(title="Select workspace")
-            root.destroy()
-        except Exception:
-            workspace = "."
-        if not workspace:
-            sys.exit(0)
+    workspace = args.directory or os.getcwd()
 
     thinking = None
     if args.thinking:    thinking = True
@@ -805,7 +859,7 @@ def main():
 
     if args.prompt:
         agent.chat_id = agent.api.create_chat_session()
-        save_session(agent.workspace, agent.chat_id, agent.parent_id)
+        save_session(agent.workspace, agent.model_type, agent.chat_id, agent.parent_id)
         agent._run(args.prompt)
     else:
         agent.start()

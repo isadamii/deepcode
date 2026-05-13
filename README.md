@@ -1,10 +1,11 @@
 # DeepCode
 
-**DeepCode** is an autonomous AI coding agent powered by DeepSeek-R1. It operates directly inside your coding workspace, capable of reading, writing, editing files, running commands, and completing full coding tasks. It features a beautiful, terminal UI inspired by Claude Code.
+**DeepCode** is an autonomous AI coding agent powered by DeepSeek-V4. It operates directly inside your coding workspace, capable of reading, writing, editing files, running commands, and completing full coding tasks. It features a beautiful, terminal UI inspired by Claude Code.
 
 ## Features
 - **Autonomous Coding**: Give it a task and it will iteratively use tools (read files, write files, run terminal commands) until the task is complete.
-- **DeepSeek-R1 Powered**: Designed specifically to work with the DeepSeek-R1 model, utilizing its `thinking` capabilities.
+- **DeepSeek-V4 Powered**: Designed specifically to work with the DeepSeek-V4 models, utilizing its `thinking` capabilities.
+- **Flash & Pro Models**: Switch between `deepseek-v4-flash` (instant) and `deepseek-v4-pro` (expert) using the `/model` command.
 - **Beautiful Terminal UI**: Real-time streaming, syntax highlighting, and a gorgeous responsive layout built with Rich.
 - **Cross-Platform**: Works on Windows, macOS, and Linux.
 

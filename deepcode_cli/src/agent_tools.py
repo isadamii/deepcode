@@ -69,13 +69,27 @@ class AgentTools:
             return f"Error: {e}"
 
     def read_file(self, file_path: str) -> str:
+        MAX_BYTES = 500_000   # 500 KB hard limit
+        MAX_LINES = 2_000
         try:
             target = self._safe_path(file_path)
+            size = os.path.getsize(target)
+            if size > MAX_BYTES:
+                return (f"Error: File too large ({size:,} bytes). "
+                        f"Max is {MAX_BYTES:,} bytes. "
+                        f"Use read_file_range to read specific sections.")
             with open(target, 'r', encoding='utf-8', errors='replace') as f:
                 content = f.read()
             lines = content.splitlines()
-            numbered = "\n".join(f"{i+1:4d} │ {line}" for i, line in enumerate(lines))
-            return f"── {file_path} ({len(lines)} lines) ──\n{numbered}"
+            total = len(lines)
+            truncated = total > MAX_LINES
+            display_lines = lines[:MAX_LINES] if truncated else lines
+            numbered = "\n".join(f"{i+1:4d} │ {line}" for i, line in enumerate(display_lines))
+            header = f"── {file_path} ({total} lines) ──"
+            result = f"{header}\n{numbered}"
+            if truncated:
+                result += f"\n… (showing first {MAX_LINES}/{total} lines — use read_file_range for more)"
+            return result
         except Exception as e:
             return f"Error: {e}"
 

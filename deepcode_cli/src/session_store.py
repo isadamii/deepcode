@@ -1,12 +1,4 @@
-"""
-Session Store — persists DeepSeek chat_id + parent_message_id to disk per workspace.
 
-DeepSeek's API is stateful: the server stores the full conversation as long as
-you reuse the same chat_session_id and chain parent_message_ids correctly.
-By saving these two values we can resume a previous conversation after restart.
-
-Storage location: ~/.deepcode/sessions/<workspace_hash>.json
-"""
 import os
 import json
 import hashlib
@@ -25,13 +17,13 @@ def _sessions_dir() -> Path:
     return d
 
 
-def _session_file(workspace: str) -> Path:
-    key = hashlib.md5(os.path.abspath(workspace).encode()).hexdigest()[:12]
+def _session_file(workspace: str, model: str) -> Path:
+    key = hashlib.md5(f"{os.path.abspath(workspace)}:{model}".encode()).hexdigest()[:12]
     return _sessions_dir() / f"{key}.json"
 
 
-def load_session(workspace: str) -> Tuple[Optional[str], Optional[str]]:
-    path = _session_file(workspace)
+def load_session(workspace: str, model: str) -> Tuple[Optional[str], Optional[str]]:
+    path = _session_file(workspace, model)
     if not path.exists():
         return None, None
     try:
@@ -41,18 +33,19 @@ def load_session(workspace: str) -> Tuple[Optional[str], Optional[str]]:
         return None, None
 
 
-def save_session(workspace: str, chat_id: str, parent_message_id: Optional[str]) -> None:
-    path = _session_file(workspace)
+def save_session(workspace: str, model: str, chat_id: str, parent_message_id: Optional[str]) -> None:
+    path = _session_file(workspace, model)
     data = {
         "chat_id": chat_id,
         "parent_message_id": parent_message_id,
         "workspace": os.path.abspath(workspace),
+        "model": model,
     }
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
-def delete_session(workspace: str) -> bool:
-    path = _session_file(workspace)
+def delete_session(workspace: str, model: str) -> bool:
+    path = _session_file(workspace, model)
     if path.exists():
         path.unlink()
         return True

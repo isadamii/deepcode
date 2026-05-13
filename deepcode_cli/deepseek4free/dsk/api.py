@@ -1,5 +1,5 @@
 from curl_cffi import requests
-from typing import Optional, Dict, Any, Generator, Literal
+from typing import Optional, Dict, Any, Generator, Literal, List
 import json
 from .pow import DeepSeekPOW
 import importlib.metadata
@@ -10,6 +10,10 @@ import time
 
 ThinkingMode = Literal['detailed', 'simple', 'disabled']
 SearchMode = Literal['enabled', 'disabled']
+
+MODEL_FLASH = "default"   # DeepSeek-V4-Flash (standard / instant)
+MODEL_PRO   = "expert"    # DeepSeek-V4-Pro (expert mode)
+MODEL_DEFAULT = MODEL_FLASH
 
 class DeepSeekError(Exception):
     pass
@@ -46,6 +50,7 @@ class DeepSeekAPI:
         self.auth_token = auth_token
         self.pow_solver = DeepSeekPOW()
         self._current_path = None
+        self._in_thinking = False
 
         cookies_path = Path(__file__).parent / 'cookies.json'
         try:
@@ -63,11 +68,11 @@ class DeepSeekAPI:
             'content-type': 'application/json',
             'origin': 'https://chat.deepseek.com',
             'referer': 'https://chat.deepseek.com/',
-            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
-            'x-app-version': '20241129.1',
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0',
+            'x-app-version': '2.0.0',
             'x-client-locale': 'en_US',
             'x-client-platform': 'web',
-            'x-client-version': '1.0.0-always',
+            'x-client-version': '2.0.0',
         }
 
         if chat_session_id:
@@ -156,7 +161,10 @@ class DeepSeekAPI:
                 '/chat_session/create',
                 {'character_id': None}
             )
-            return response['data']['biz_data']['id']
+            biz_data = response['data']['biz_data']
+            if 'chat_session' in biz_data:
+                return biz_data['chat_session']['id']
+            return biz_data['id']
         except KeyError:
             raise APIError("Invalid session creation response format from server")
 
@@ -187,12 +195,37 @@ class DeepSeekAPI:
         except Exception as e:
             return False
 
+    def get_current_user(self) -> Dict[str, Any]:
+        """Fetches the current user information"""
+        try:
+            response = self._make_request(
+                'GET',
+                '/users/current',
+                json_data=None
+            )
+            return response['data']['biz_data']
+        except KeyError:
+            raise APIError("Invalid user info response format from server")
+
+    def get_chat_sessions(self) -> List[Dict[str, Any]]:
+        """Lists the user's chat sessions"""
+        try:
+            response = self._make_request(
+                'GET',
+                '/chat_session/fetch_page?lte_cursor.pinned=false',
+                json_data=None
+            )
+            return response['data']['biz_data']['chat_sessions']
+        except KeyError:
+            raise APIError("Invalid chat sessions response format from server")
+
     def chat_completion(self,
                     chat_session_id: str,
                     prompt: str,
                     parent_message_id: Optional[str] = None,
                     thinking_enabled: bool = True,
-                    search_enabled: bool = False) -> Generator[Dict[str, Any], None, None]:
+                    search_enabled: bool = False,
+                    model_type: str = MODEL_DEFAULT) -> Generator[Dict[str, Any], None, None]:
         """Send a message and get streaming response using the new stateful format"""
         if not prompt or not isinstance(prompt, str):
             raise ValueError("Prompt must be a non-empty string")
@@ -202,11 +235,16 @@ class DeepSeekAPI:
         json_data = {
             'chat_session_id': chat_session_id,
             'parent_message_id': parent_message_id,
+            'model_type': model_type,
             'prompt': prompt,
             'ref_file_ids': [],
             'thinking_enabled': thinking_enabled,
             'search_enabled': search_enabled,
         }
+
+        self._current_path = None
+        self._in_thinking = True 
+        self._fragment_streaming = False  
 
         try:
             headers = self._get_headers(
@@ -234,24 +272,27 @@ class DeepSeekAPI:
                 else:
                     raise APIError(f"API request failed: {error_text}", response.status_code)
 
-            self._current_path = None
             self._current_event = None
 
             for chunk in response.iter_lines():
                 if not chunk: continue
                 try:
                     line = chunk.decode('utf-8', 'ignore')
-                    
+
                     if line.startswith('event: '):
                         self._current_event = line[7:].strip()
+                        if self._current_event == 'ready':
+                            self._current_path = None
+                            self._in_thinking = False
                         continue
-                    
+
                     if line.startswith('data: '):
                         data_json = json.loads(line[6:])
                         parsed = self._parse_deepseek_data(data_json)
                         if parsed:
                             yield parsed
-                except Exception:
+                except Exception as e:
+                    print(f"\n[DEBUG] Parsing error: {e}. Line: {line}")
                     continue
 
         except requests.exceptions.RequestException as e:
@@ -259,48 +300,70 @@ class DeepSeekAPI:
 
     def _parse_deepseek_data(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Parse the structured data from DeepSeek's SSE stream."""
-        
         if self._current_event == 'ready':
             if 'response_message_id' in data:
-                return {
-                    'type': 'status',
-                    'message_id': data['response_message_id']
-                }
+                return {'type': 'status', 'message_id': data['response_message_id']}
+            return None
 
-        res = {}
-        
-        if 'v' in data and isinstance(data['v'], dict):
-            resp = data['v'].get('response', {})
-            if isinstance(resp, dict) and 'message_id' in resp:
-                res['message_id'] = resp['message_id']
-                res['type'] = 'status'
+        p = data.get('p', '')
+        v = data.get('v')
+        o = data.get('o', '')
 
-        if 'p' in data:
-            self._current_path = data['p']
+        if not p and isinstance(v, dict):
+            resp = v.get('response', {})
+            if isinstance(resp, dict):
+                frags = resp.get('fragments', [])
+                if isinstance(frags, list) and frags:
+                    last_frag = frags[-1]
+                    ftype = str(last_frag.get('type', '')).upper()
+                    if ftype:
+                        self._in_thinking = (ftype == 'THINK')
+                        self._fragment_streaming = True
+                    
+                    content = last_frag.get('content', '')
+                    if content:
+                        return {
+                            'type': 'thinking' if self._in_thinking else 'text',
+                            'content': content
+                        }
+                
+                if 'message_id' in resp:
+                    return {'type': 'status', 'message_id': resp['message_id']}
+            return None
 
-        if 'v' in data:
-            val = data['v']
-            if isinstance(val, str):
-                ctype = 'text'
-                if self._current_path == 'response/thinking_content':
-                    ctype = 'thinking'
-                elif self._current_path == 'response/content':
-                    ctype = 'text'
-                elif self._current_path and 'fragments' in self._current_path:
-                    ctype = 'text' 
-                else:
+        if p == 'response/fragments' and o == 'APPEND' and isinstance(v, list):
+            if v:
+                frag = v[0]
+                ftype = str(frag.get('type', '')).upper()
+                if ftype:
+                    self._in_thinking = (ftype == 'THINK')
+                    self._fragment_streaming = True
+                content = frag.get('content', '')
+                if content:
+                    return {
+                        'type': 'thinking' if self._in_thinking else 'text',
+                        'content': content
+                    }
+            return None
 
-                    ctype = 'text' 
-                res.update({
-                    'content': val,
-                    'type': ctype
-                })
-                return res
-
-        if 'msg_id' in data:
+        if p == 'response/fragments/-1/content' and isinstance(v, str):
+            self._fragment_streaming = True
             return {
-                'type': 'status',
-                'message_id': data['msg_id']
+                'type': 'thinking' if self._in_thinking else 'text',
+                'content': v
             }
 
-        return res if 'type' in res else None
+        if not p and isinstance(v, str) and self._fragment_streaming:
+            return {
+                'type': 'thinking' if self._in_thinking else 'text',
+                'content': v
+            }
+
+        if (p == 'response/status' and v == 'FINISHED') or \
+           (o == 'BATCH' and any(x.get('p') == 'quasi_status' and x.get('v') == 'FINISHED' for x in (v if isinstance(v, list) else []))):
+            self._fragment_streaming = False
+            return None
+
+        return None
+
+

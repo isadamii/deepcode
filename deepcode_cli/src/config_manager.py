@@ -5,18 +5,22 @@ DEFAULT_CONFIG = {
     # Core Agent Settings
     "agent_name": "DeepCode",
     "version": "2.0.0",
-    
+
     # Enabled capabilities by default
     "thinking_enabled": True,       # Toggle DeepSeek-R1's extended thinking process
     "web_search_enabled": True,     # Toggle web search capability
-    
+
+    # Model selection: "flash" (DeepSeek-V4-Flash) or "pro" (DeepSeek-V4-Pro)
+    # Changing this mid-session creates a new chat automatically.
+    "model_type": "pro",
+
     # UI and Session Settings
     "show_thinking": False,         # Whether to display the raw thinking text after completion
     "default_workspace": ".",       # Default starting directory
     "max_iterations": 20,           # Max automated steps the agent can take per request
     "delete_on_exit": False,        # Whether to delete session history when exiting
-    "deepseek_auth_token": "",      # Your DeepSeek API key
-    
+    "deepseek_auth_token": "",      # Your DeepSeek auth token
+
     # Terminal UI Colors (ANSI 256 color codes)
     "theme": {
         "primary": "84",            # Green
@@ -25,6 +29,16 @@ DEFAULT_CONFIG = {
         "dim": "242"                # Gray
     }
 }
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Recursively merge override into base, returning a new dict."""
+    result = base.copy()
+    for key, val in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(val, dict):
+            result[key] = _deep_merge(result[key], val)
+        else:
+            result[key] = val
+    return result
 
 class ConfigManager:
     def __init__(self, config_path=None):
@@ -46,7 +60,8 @@ class ConfigManager:
         if os.path.exists(self.config_path):
             try:
                 with open(self.config_path, 'r') as f:
-                    return {**DEFAULT_CONFIG, **json.load(f)}
+                    # Deep merge so nested dicts like "theme" are properly merged
+                    return _deep_merge(DEFAULT_CONFIG, json.load(f))
             except Exception:
                 return DEFAULT_CONFIG.copy()
         return DEFAULT_CONFIG.copy()
