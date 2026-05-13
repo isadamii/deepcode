@@ -576,7 +576,7 @@ class DeepCode:
                             secs = max(1, round(think_duration))
                             console.print(f"[meta]\u22c5 thought for {secs}s[/]")
                         
-                        live_ctx = Live(console=console, auto_refresh=False, vertical_overflow="visible")
+                        live_ctx = Live(console=console, auto_refresh=False, vertical_overflow="crop", transient=True)
                         live_ctx.start()
 
                     clean = content
